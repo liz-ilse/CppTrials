@@ -2,6 +2,8 @@ useDynLib(CppTrials, .registration = TRUE)
 
 importFrom(Rcpp, sourceCpp)
 
+import(RcppNumerical)
+
 export(run_trial_ubr)
 
 export(run_trial_mpbr)

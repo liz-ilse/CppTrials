@@ -11,4 +11,4 @@ RoxygenNote: 7.3.3
 LinkingTo: 
     Rcpp, RcppEigen, RcppNumerical
 Imports: 
-    Rcpp, RcppEigen
+    Rcpp, RcppEigen, RcppNumerical
