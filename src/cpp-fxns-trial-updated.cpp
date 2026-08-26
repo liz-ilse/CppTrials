@@ -1450,7 +1450,12 @@ List run_sampler_internal(
 
       NumericVector eu = EU_internal(cur_post_pi, Ut_mat, n_doses);
       for (int j = 0; j < n_doses; j++) exp_ut(i_sam, j) = eu[j];
-
+      
+      if (Rcpp::which_max(eu) == NA_INTEGER) {
+        Rf_error("all-NaN eu at t=%d, n_t=%d, rho=%f, b_0=%f, b_1=%f, a_0=%f",
+                 t, n_t, cur_rho, cur_b_0, cur_b_1, cur_a_0);
+      }
+      
       optimal_dose[i_sam] = doses_mg[Rcpp::which_max(eu)];
 
       i_sam++;
