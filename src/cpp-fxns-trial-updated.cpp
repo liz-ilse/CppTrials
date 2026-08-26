@@ -955,6 +955,12 @@ List run_sampler(
       
       i_sam++;
     }
+    
+    // added for bug chaser
+    if (t % 200 == 0) {
+      Rprintf("t=%d a_0=%f a_1=%f a_3=%f b_0=%f b_1=%f rho=%f\n",
+              t, cur_a_0, cur_a_1, cur_a_3, cur_b_0, cur_b_1, cur_rho);
+    }
   }
    
   return List::create(
@@ -1047,6 +1053,19 @@ double U_low_fxn(
 { 
   return U_low_fxn_internal(h_T, h_R, sigma, Ut_mat, K);
 } 
+
+/////////////// Guarding against NAs from runaway sampler ////////////////////
+
+
+inline int which_max_finite(const Rcpp::NumericVector& x) {
+  int best = -1;
+  for (int i = 0; i < x.size(); i++) {
+    if (!R_finite(x[i])) continue;
+    if (best < 0 || x[i] > x[best]) best = i;
+  }
+  return best;   // -1 if nothing finite
+}
+
 
 /////////////////////// Sampling Observations /////////////////////////////////
 
@@ -1451,12 +1470,8 @@ List run_sampler_internal(
       NumericVector eu = EU_internal(cur_post_pi, Ut_mat, n_doses);
       for (int j = 0; j < n_doses; j++) exp_ut(i_sam, j) = eu[j];
       
-      if (Rcpp::which_max(eu) == NA_INTEGER) {
-        Rf_error("all-NaN eu at t=%d, n_t=%d, rho=%f, b_0=%f, b_1=%f, a_0=%f",
-                 t, n_t, cur_rho, cur_b_0, cur_b_1, cur_a_0);
-      }
-      
-      optimal_dose[i_sam] = doses_mg[Rcpp::which_max(eu)];
+      int im = which_max_finite(eu);
+      optimal_dose[i_sam] = (im < 0) ? NA_REAL : doses_mg[im];
 
       i_sam++;
     }
@@ -1541,6 +1556,8 @@ List run_trial_ubr(
   int n_t = 0;
   int coh_num = 0;
 
+  IntegerVector dose_count(n_doses);
+  
   IntegerVector urn(n_doses);
   for (int l = 0; l < n_doses; l++) urn[l] = 1;
 
@@ -1571,6 +1588,8 @@ List run_trial_ubr(
     // assign a dose, simulate the cohort, update the urn
     int asn = ub_sample_assign_internal(A_t, urn, n_doses, n_balls, coh_num);
     if (asn < 0) { stop_reason = "all_unacceptable"; break; }
+    
+    dose_count[asn - 1]++;
 
     y = sim_cohort_internal(co_sz, asn, doses, std_d_doses, pi_jk, y, K);
 
@@ -1665,7 +1684,10 @@ List run_trial_ubr(
     
     // mean EU per dose, then the maximising dose in mg
     for (int l = 0; l < n_doses; l++) post_mean_utility[l] = mean_eu[l];
-    post_mean_utility[n_doses] = doses[Rcpp::which_max(mean_eu)];
+    
+    int imeu = which_max_finite(mean_eu);
+    post_mean_utility[n_doses] = (imeu < 0) ? NA_REAL : doses[imeu];
+    
     
     // final optimal dose: the acceptable dose with the highest posterior mean
     // expected utility. The acceptable set is the complement of unac_dose_i at
@@ -1712,7 +1734,8 @@ List run_trial_ubr(
     Rcpp::Named("urn")               = urn,
     Rcpp::Named("trial_end")         = n_t,
     Rcpp::Named("coh_num")           = coh_num,
-    Rcpp::Named("stop_reason")       = stop_reason);
+    Rcpp::Named("stop_reason")       = stop_reason,
+    Rcpp::Named("dose_count")        = dose_count);
 }
 
 /////////////////////// no_skip_version2 assignment ///////////////////////////
@@ -1905,6 +1928,8 @@ List run_trial_mpbr(
   int n_t = 0;
   int coh_num = 0;
   
+  IntegerVector dose_count(n_doses);
+  
   IntegerVector urn(n_doses);
   for (int l = 0; l < n_doses; l++) urn[l] = 1;
   
@@ -1937,6 +1962,8 @@ List run_trial_mpbr(
     if (asn == -2) { stop_reason = "no_assignable"; break; }
     if (asn == -3) { Rcpp::stop("Internal error: empty y with coh_num > 0."); }
     if (asn < 0)   { stop_reason = "all_unacceptable"; break; }
+    
+    dose_count[asn - 1]++;
     
     y = sim_cohort_internal(co_sz, asn, doses, std_d_doses, pi_jk, y, K);
     
@@ -2063,32 +2090,38 @@ List run_trial_mpbr(
     }
     
     for (int l = 0; l < n_doses; l++) post_mean_utility[l] = mean_eu[l];
-    post_mean_utility[n_doses] = doses[Rcpp::which_max(mean_eu)];
     
-    // final optimal dose: the acceptable dose with the highest posterior mean
-    // expected utility. The acceptable set is the complement of unac_dose_i at
-    // the final interim analysis. If every dose is unacceptable there is no
-    // optimal dose and final_optimal is left as NA.
+    int im = which_max_finite(mean_eu);
+    post_mean_utility[n_doses] = (im < 0) ? NA_REAL : doses[im];
+    
+    // build set of tried dose indices (0-indexed)
+    std::vector<bool> tried(n_doses, false);
+    for (int i = 0; i < y.nrow(); i++) {
+      for (int l = 0; l < n_doses; l++) {
+        if (std::abs(y(i, 2) - doses[l]) < 1e-10) { tried[l] = true; break; }
+      }
+    }
+    
+    // final optimal: must be both acceptable AND tried
     int best = -1;
     for (int l = 0; l < n_doses; l++) {
-
+      
+      if (!tried[l]) continue;
+      
       bool is_unac = false;
       for (int u = 0; u < unac_dose_i.size(); u++) {
         if (unac_dose_i[u] == l + 1) { is_unac = true; break; }
       }
       if (is_unac) continue;
-
-      // strict > scanning upwards means ties go to the lowest dose,
-      // matching which.max
+      
       if (best < 0 || mean_eu[l] > mean_eu[best]) best = l;
     }
-
+    
     if (best >= 0) {
       final_optimal   = doses[best];
-      final_optimal_i = best + 1;   // 1-indexed, for use as an R index
+      final_optimal_i = best + 1;
     }
   }
-  
   // number of cohorts at which each dose was acceptable (NA rows skipped)
   for (int l = 0; l < n_doses; l++) {
     int c = 0;
@@ -2112,7 +2145,8 @@ List run_trial_mpbr(
     Rcpp::Named("urn")               = urn,
     Rcpp::Named("trial_end")         = n_t,
     Rcpp::Named("coh_num")           = coh_num,
-    Rcpp::Named("stop_reason")       = stop_reason);
+    Rcpp::Named("stop_reason")       = stop_reason,
+    Rcpp::Named("dose_count")         = dose_count);
 }
 
 
@@ -2208,6 +2242,8 @@ List run_trial_veto_ubr(
   int n_t = 0;
   int coh_num = 0;
   
+  IntegerVector dose_count(n_doses);
+  
   IntegerVector urn(n_doses);
   for (int l = 0; l < n_doses; l++) urn[l] = 1;
   
@@ -2242,6 +2278,8 @@ List run_trial_veto_ubr(
     if (asn == -2) { stop_reason = "no_assignable"; break; }
     if (asn == -3) { Rcpp::stop("Internal error: empty y with coh_num > 0."); }
     if (asn < 0)   { stop_reason = "all_unacceptable"; break; }
+    
+    dose_count[asn - 1]++;
     
     y = sim_cohort_internal(co_sz, asn, doses, std_d_doses, pi_jk, y, K);
     
@@ -2374,32 +2412,38 @@ List run_trial_veto_ubr(
     }
     
     for (int l = 0; l < n_doses; l++) post_mean_utility[l] = mean_eu[l];
-    post_mean_utility[n_doses] = doses[Rcpp::which_max(mean_eu)];
     
-    // final optimal dose: the acceptable dose with the highest posterior mean
-    // expected utility. The acceptable set is the complement of unac_dose_i at
-    // the final interim analysis. If every dose is unacceptable there is no
-    // optimal dose and final_optimal is left as NA.
+    int im = which_max_finite(mean_eu);
+    post_mean_utility[n_doses] = (im < 0) ? NA_REAL : doses[im];
+    
+    // build set of tried dose indices (0-indexed)
+    std::vector<bool> tried(n_doses, false);
+    for (int i = 0; i < y.nrow(); i++) {
+      for (int l = 0; l < n_doses; l++) {
+        if (std::abs(y(i, 2) - doses[l]) < 1e-10) { tried[l] = true; break; }
+      }
+    }
+    
+    // final optimal: must be both acceptable AND tried
     int best = -1;
     for (int l = 0; l < n_doses; l++) {
-
+      
+      if (!tried[l]) continue;
+      
       bool is_unac = false;
       for (int u = 0; u < unac_dose_i.size(); u++) {
         if (unac_dose_i[u] == l + 1) { is_unac = true; break; }
       }
       if (is_unac) continue;
-
-      // strict > scanning upwards means ties go to the lowest dose,
-      // matching which.max
+      
       if (best < 0 || mean_eu[l] > mean_eu[best]) best = l;
     }
-
+    
     if (best >= 0) {
       final_optimal   = doses[best];
-      final_optimal_i = best + 1;   // 1-indexed, for use as an R index
+      final_optimal_i = best + 1;
     }
   }
-  
   // number of cohorts at which each dose was acceptable (NA rows skipped)
   for (int l = 0; l < n_doses; l++) {
     int c = 0;
@@ -2422,7 +2466,8 @@ List run_trial_veto_ubr(
     Rcpp::Named("tox_applied")       = tox_applied,
     Rcpp::Named("unac_dose_i")       = unac_dose_i,
     Rcpp::Named("urn")               = urn,
-    Rcpp::Named("trial_end")               = n_t,
+    Rcpp::Named("trial_end")         = n_t,
     Rcpp::Named("coh_num")           = coh_num,
-    Rcpp::Named("stop_reason")       = stop_reason);
+    Rcpp::Named("stop_reason")       = stop_reason,
+    Rcpp::Named("dose_count")        = dose_count);
 }
