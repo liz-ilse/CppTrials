@@ -957,11 +957,6 @@ List run_sampler(
       i_sam++;
     }
     
-    // added for bug chaser
-    if (t % 200 == 0) {
-      Rprintf("t=%d a_0=%f a_1=%f a_3=%f b_0=%f b_1=%f rho=%f\n",
-              t, cur_a_0, cur_a_1, cur_a_3, cur_b_0, cur_b_1, cur_rho);
-    }
   }
    
   return List::create(
@@ -1475,6 +1470,12 @@ List run_sampler_internal(
       optimal_dose[i_sam] = (im < 0) ? NA_REAL : doses_mg[im];
 
       i_sam++;
+    }
+    
+    // added for bug chaser
+    if (t % 200 == 0) {
+      Rprintf("t=%d a_0=%f a_1=%f a_3=%f b_0=%f b_1=%f rho=%f\n",
+              t, cur_a_0, cur_a_1, cur_a_3, cur_b_0, cur_b_1, cur_rho);
     }
   }
 
