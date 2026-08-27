@@ -951,7 +951,8 @@ List run_sampler(
       for (int j = 0; j < n_doses; j++) exp_ut(i_sam, j) = eu[j];
        
       // optimal dose index
-      optimal_dose[i_sam] = doses_mg[Rcpp::which_max(eu)];
+      int im = which_max_finite(eu);
+      optimal_dose[i_sam] = (im < 0) ? NA_REAL : doses_mg[im];
       
       i_sam++;
     }
