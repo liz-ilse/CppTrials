@@ -726,6 +726,19 @@ double rho_log_jacob_internal(double rho)
   return std::log(rho * (1.0 - rho));
 }
 
+/////////////// Guarding against NAs from runaway sampler ////////////////////
+
+
+inline int which_max_finite(const Rcpp::NumericVector& x) {
+  int best = -1;
+  for (int i = 0; i < x.size(); i++) {
+    if (!R_finite(x[i])) continue;
+    if (best < 0 || x[i] > x[best]) best = i;
+  }
+  return best;   // -1 if nothing finite
+}
+
+
 
 /////////////////////// Posterior Expected Utility ////////////////////////////
 
@@ -1050,17 +1063,6 @@ double U_low_fxn(
   return U_low_fxn_internal(h_T, h_R, sigma, Ut_mat, K);
 } 
 
-/////////////// Guarding against NAs from runaway sampler ////////////////////
-
-
-inline int which_max_finite(const Rcpp::NumericVector& x) {
-  int best = -1;
-  for (int i = 0; i < x.size(); i++) {
-    if (!R_finite(x[i])) continue;
-    if (best < 0 || x[i] > x[best]) best = i;
-  }
-  return best;   // -1 if nothing finite
-}
 
 
 /////////////////////// Sampling Observations /////////////////////////////////
@@ -1472,11 +1474,6 @@ List run_sampler_internal(
       i_sam++;
     }
     
-    // added for bug chaser
-    if (t % 200 == 0) {
-      Rprintf("t=%d a_0=%f a_1=%f a_3=%f b_0=%f b_1=%f rho=%f\n",
-              t, cur_a_0, cur_a_1, cur_a_3, cur_b_0, cur_b_1, cur_rho);
-    }
   }
 
   return List::create(
