@@ -1585,8 +1585,12 @@ List run_trial_ubr(
   while (true) {
     
     // assign a dose, simulate the cohort, update the urn
-    int asn = ub_sample_assign_internal(A_t, urn, n_doses, n_balls, coh_num);
-    if (asn < 0) { stop_reason = "all_unacceptable"; break; }
+    int asn = no_skip_v2_assign_internal(A_t, urn, y, doses, n_doses, n_balls, 
+                                         coh_num);
+    
+    if (asn == -2) { stop_reason = "no_assignable"; break; }
+    if (asn == -3) { Rcpp::stop("Internal error: empty y with coh_num > 0."); }
+    if (asn < 0)   { stop_reason = "all_unacceptable"; break; }
     
     dose_count[asn - 1]++;
 
