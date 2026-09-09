@@ -1484,6 +1484,116 @@ List run_sampler_internal(
     Rcpp::Named("post_pi_jk")   = post_pi_jk);
 }
 
+/////////////////////// no_skip_version2 assignment ///////////////////////////
+
+// Internal only - no_skip_version2 dose assignment.
+//
+// A_t     : 1-indexed acceptable dose positions, increasing
+// urn     : modified in place
+// y       : current observation matrix (column 2 = Dose, in mg); ignored on
+//           the first cohort
+// doses   : dose values in mg, increasing, same order as A_t's indices
+// n_balls : number to increment urn after each assignment
+// coh_num : number of cohorts already completed
+//
+// Returns the 1-indexed assigned dose, or:
+//   -1  if A_t is empty (should not occur - the trial loop stops before
+//       calling this once all doses are unacceptable)
+//   -2  if A_t is non-empty but no dose at or below d_M(t) is acceptable
+//       ("no assignable doses" - a distinct stopping condition from -1)
+//   -3  if coh_num > 0 but y is empty (defensive; should not occur)
+
+int no_skip_v2_assign_internal(
+    IntegerVector A_t,
+    IntegerVector& urn,
+    NumericMatrix y,
+    NumericVector doses,
+    int n_doses,
+    int n_balls,
+    int coh_num)
+{
+  int assign;
+  
+  if (coh_num == 0) {
+    
+    // step 1: first cohort at d_2
+    assign = 2;
+    
+  } else {
+    
+    int n_A = A_t.size();
+    if (n_A == 0) return -1;
+    
+    // d_M(t): the maximum dose tried so far, read from y's Dose column.
+    // y is guaranteed non-empty whenever coh_num > 0, since coh_num is only
+    // incremented after a cohort has been simulated, but guard regardless.
+    int n_rows = y.nrow();
+    if (n_rows == 0) return -3;
+    
+    double d_Mt = y(0, 2);
+    for (int i = 1; i < n_rows; i++) if (y(i, 2) > d_Mt) d_Mt = y(i, 2);
+    
+    int d_Mt_ind = -1;
+    for (int l = 0; l < n_doses; l++) {
+      if (std::abs(doses[l] - d_Mt) < 1e-10) { d_Mt_ind = l + 1; break; }
+    }
+    
+    // no match means the Dose column and the doses vector disagree, which
+    // would silently corrupt the escalation rule - fail loudly instead
+    if (d_Mt_ind < 0) {
+      Rcpp::stop("Maximum tried dose not found in doses; check that doses matches the Dose column of y.");
+    }
+    
+    IntegerVector assignable;
+    
+    if (d_Mt_ind == n_doses) {
+      
+      // every dose has been tried: A(t) = A_t
+      assignable = A_t;
+      
+    } else {
+      
+      int d_Mt_1_idx = d_Mt_ind + 1;   // 1-indexed position of the next dose
+      
+      bool next_is_acceptable = false;
+      for (int i = 0; i < n_A; i++) {
+        if (A_t[i] == d_Mt_1_idx) { next_is_acceptable = true; break; }
+      }
+      
+      if (next_is_acceptable) {
+        // step 3: escalate to d_{M(t)+1} only, never further
+        assignable = IntegerVector::create(d_Mt_1_idx);
+      } else {
+        // step 3a: A(t) = doses in A_t strictly below d_{M(t)+1}
+        std::vector<int> av;
+        for (int i = 0; i < n_A; i++) {
+          if (A_t[i] < d_Mt_1_idx) av.push_back(A_t[i]);
+        }
+        assignable = IntegerVector(av.size());
+        for (size_t i = 0; i < av.size(); i++) assignable[i] = av[i];
+      }
+    }
+    
+    if (assignable.size() == 0) return -2;
+    
+    if (assignable.size() > 1) {
+      NumericVector red_urn(assignable.size());
+      for (int i = 0; i < assignable.size(); i++) red_urn[i] = urn[assignable[i] - 1];
+      assign = sample_with_prob_internal(assignable, red_urn);
+    } else {
+      assign = assignable[0];
+    }
+  }
+  
+  // urn[-d_ind] <- urn[-d_ind] + 1
+  for (int l = 1; l <= n_doses; l++) {
+    if (l != assign) urn[l - 1] += n_balls;
+  }
+  
+  return assign;
+}
+
+
 /////////////////////// trial: U-Bayes urn assignment /////////////////////////
 
 // One replicate of the U-Bayes adaptive trial (the body of the R for-loop over
@@ -1741,114 +1851,6 @@ List run_trial_ubr(
     Rcpp::Named("dose_count")        = dose_count);
 }
 
-/////////////////////// no_skip_version2 assignment ///////////////////////////
-
-// Internal only - no_skip_version2 dose assignment.
-//
-// A_t     : 1-indexed acceptable dose positions, increasing
-// urn     : modified in place
-// y       : current observation matrix (column 2 = Dose, in mg); ignored on
-//           the first cohort
-// doses   : dose values in mg, increasing, same order as A_t's indices
-// n_balls : number to increment urn after each assignment
-// coh_num : number of cohorts already completed
-//
-// Returns the 1-indexed assigned dose, or:
-//   -1  if A_t is empty (should not occur - the trial loop stops before
-//       calling this once all doses are unacceptable)
-//   -2  if A_t is non-empty but no dose at or below d_M(t) is acceptable
-//       ("no assignable doses" - a distinct stopping condition from -1)
-//   -3  if coh_num > 0 but y is empty (defensive; should not occur)
-
-int no_skip_v2_assign_internal(
-    IntegerVector A_t,
-    IntegerVector& urn,
-    NumericMatrix y,
-    NumericVector doses,
-    int n_doses,
-    int n_balls,
-    int coh_num)
-{
-  int assign;
-  
-  if (coh_num == 0) {
-    
-    // step 1: first cohort at d_2
-    assign = 2;
-    
-  } else {
-    
-    int n_A = A_t.size();
-    if (n_A == 0) return -1;
-    
-    // d_M(t): the maximum dose tried so far, read from y's Dose column.
-    // y is guaranteed non-empty whenever coh_num > 0, since coh_num is only
-    // incremented after a cohort has been simulated, but guard regardless.
-    int n_rows = y.nrow();
-    if (n_rows == 0) return -3;
-    
-    double d_Mt = y(0, 2);
-    for (int i = 1; i < n_rows; i++) if (y(i, 2) > d_Mt) d_Mt = y(i, 2);
-    
-    int d_Mt_ind = -1;
-    for (int l = 0; l < n_doses; l++) {
-      if (std::abs(doses[l] - d_Mt) < 1e-10) { d_Mt_ind = l + 1; break; }
-    }
-    
-    // no match means the Dose column and the doses vector disagree, which
-    // would silently corrupt the escalation rule - fail loudly instead
-    if (d_Mt_ind < 0) {
-      Rcpp::stop("Maximum tried dose not found in doses; check that doses matches the Dose column of y.");
-    }
-    
-    IntegerVector assignable;
-    
-    if (d_Mt_ind == n_doses) {
-      
-      // every dose has been tried: A(t) = A_t
-      assignable = A_t;
-      
-    } else {
-      
-      int d_Mt_1_idx = d_Mt_ind + 1;   // 1-indexed position of the next dose
-      
-      bool next_is_acceptable = false;
-      for (int i = 0; i < n_A; i++) {
-        if (A_t[i] == d_Mt_1_idx) { next_is_acceptable = true; break; }
-      }
-      
-      if (next_is_acceptable) {
-        // step 3: escalate to d_{M(t)+1} only, never further
-        assignable = IntegerVector::create(d_Mt_1_idx);
-      } else {
-        // step 3a: A(t) = doses in A_t strictly below d_{M(t)+1}
-        std::vector<int> av;
-        for (int i = 0; i < n_A; i++) {
-          if (A_t[i] < d_Mt_1_idx) av.push_back(A_t[i]);
-        }
-        assignable = IntegerVector(av.size());
-        for (size_t i = 0; i < av.size(); i++) assignable[i] = av[i];
-      }
-    }
-    
-    if (assignable.size() == 0) return -2;
-    
-    if (assignable.size() > 1) {
-      NumericVector red_urn(assignable.size());
-      for (int i = 0; i < assignable.size(); i++) red_urn[i] = urn[assignable[i] - 1];
-      assign = sample_with_prob_internal(assignable, red_urn);
-    } else {
-      assign = assignable[0];
-    }
-  }
-  
-  // urn[-d_ind] <- urn[-d_ind] + 1
-  for (int l = 1; l <= n_doses; l++) {
-    if (l != assign) urn[l - 1] += n_balls;
-  }
-  
-  return assign;
-}
 
 
 /////////////////////// trial: no_skip_version2 + dichotomised monitoring /////
