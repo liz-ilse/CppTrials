@@ -1,9 +1,9 @@
 Package: CppTrials
-Title: What the Package Does (One Line, Title Case)
-Version: 0.0.1.005
+Title: Utility Based Clinical Trials Sampler
+Version: 0.0.1.006
 Authors@R: 
     person("First", "Last", , "first.last@example.com", role = c("aut", "cre"))
-Description: What the package does (one paragraph).
+Description: Generates clinical trial scenarios and fits bivariate probit regression models to the data. Three distinct trial functions impose monitoring rules corresponding to four different trial designs.
 License: GPL-3
 Encoding: UTF-8
 Roxygen: list(markdown = TRUE)
