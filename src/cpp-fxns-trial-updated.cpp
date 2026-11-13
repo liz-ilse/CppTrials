@@ -1068,14 +1068,6 @@ double U_low_fxn(
 /////////////////////// Sampling Observations /////////////////////////////////
 
 // The three routines below reproduce R's sample(..., prob = ) bit for bit.
-// R does not use a plain inverse-CDF walk: it first sorts the probabilities
-// into descending order with revsort() (an unstable heapsort that permutes an
-// index array alongside), then walks the sorted cumulative sum. Drawing from
-// the unsorted vector consumes the same number of uniforms but can select a
-// different element, so the sorted version is required to match R exactly.
-// These are called once per cohort, never inside the MCMC loop, so the extra
-// O(n log n) sort on a length-(K[0]*K[1]) vector is negligible.
-
 // Verbatim port of revsort() from R's src/main/sort.c.
 // Sorts a[] into descending order and permutes ib[] alongside.
 static void revsort_internal(double *a, int *ib, int n)
@@ -1128,9 +1120,6 @@ static void revsort_internal(double *a, int *ib, int n)
 // normalisation that FixupProb() performs. Returns nans draws as 1-indexed
 // positions in prob_in. Equivalent to
 //   sample(seq_along(prob_in), nans, replace = TRUE, prob = prob_in)
-// Note: R's sampler calls unif_rand() directly, not runif(0, 1). Rf_runif
-// rejects draws of exactly 0 or 1 in a do-while loop, which would desynchronise
-// the stream, so unif_rand() must be used here.
 IntegerVector prob_sample_replace_internal(NumericVector prob_in, int nans)
 {
   int n = prob_in.size();
@@ -1594,21 +1583,9 @@ int no_skip_v2_assign_internal(
 }
 
 
-/////////////////////// trial: U-Bayes urn assignment /////////////////////////
+////////////////////////////// trial: U-Bayes  /////////////////////////////////
 
-// One replicate of the U-Bayes adaptive trial (the body of the R for-loop over
-// s in 1:num_trial). The caller supplies the seed and loops over replicates.
-//
-// Arguments
-//   co_sz       - cohort size
-//   n_doses     - number of dose levels
-//   doses       - dose values in mg, increasing
-//   std_d_doses - standardised doses, same order as doses
-//   pi_jk       - list of n_doses true joint probability matrices (K[0] x K[1])
-//   N_max       - maximum total sample size
-//   cu_star     - final monitoring cut-off
-//   U_low       - utility lower bound
-//   n_balls     - urn increment for unassigned doses
+// One replicate of the U-Bayes adaptive trial 
 
 // [[Rcpp::export]]
 List run_trial_ubr(
@@ -1849,19 +1826,8 @@ List run_trial_ubr(
 
 
 
-/////////////////////// trial: no_skip_version2 + dichotomised monitoring /////
+/////////////////////////// trial: mpbr ///////////////////////////////////////
 
-// One replicate of the adaptive trial using no_skip_version2 assignment and the
-// dichotomised toxicity/futility monitoring rule.
-//
-// Additional arguments relative to the U-Bayes trial:
-//   h_T         - toxicity dichotomisation index; dose is judged on
-//                 xi_T = Pr(y_T >= h_T), i.e. marginal columns h_T..K[0]-1
-//   h_R         - response dichotomisation index; xi_R = Pr(y_R >= h_R)
-//   upper_xi_T  - toxicity threshold; dose unacceptable if
-//                 Pr(xi_T > upper_xi_T | data) > c_T
-//   lower_xi_R  - efficacy threshold; dose unacceptable if
-//                 Pr(xi_R < lower_xi_R | data) > c_R
 
 // [[Rcpp::export]]
 List run_trial_mpbr(
@@ -2068,10 +2034,7 @@ List run_trial_mpbr(
   }
   
   // ---- trial summaries from the final posterior sample ----
-  // (skipped if the sampler never ran, i.e. no_assignable fired on the very
-  // first cohort - not reachable given coh_num == 0 always assigns dose 2,
-  // but guarded here rather than assumed) 
-  // aka does not have equivalent behavior in R since R does not have a fail safe
+  // R version does not have the fail safe
   
   NumericVector post_mean_utility(n_doses + 1, NA_REAL);
   double final_optimal = NA_REAL;
@@ -2132,6 +2095,23 @@ List run_trial_mpbr(
     A_t_Count[l] = c;
   }
   
+  // final_unac: doses unacceptable at the end of the trial
+  std::vector<int> fu_v;
+  for (int l = 0; l < n_doses; l++) {
+    
+    bool is_unac = (dose_count[l] == 0);
+    
+    if (!is_unac) {
+      for (int u = 0; u < unac_dose_i.size(); u++) {
+        if (unac_dose_i[u] == l + 1) { is_unac = true; break; }
+      }
+    }
+    
+    if (is_unac) fu_v.push_back(l + 1);
+  }
+  IntegerVector final_unac(fu_v.size());
+  for (size_t u = 0; u < fu_v.size(); u++) final_unac[u] = fu_v[u];
+  
   return List::create(
     Rcpp::Named("y")                 = y,
     Rcpp::Named("samp")              = samp,
@@ -2140,6 +2120,7 @@ List run_trial_mpbr(
     Rcpp::Named("post_mean_utility") = post_mean_utility,
     Rcpp::Named("final_optimal")     = final_optimal,
     Rcpp::Named("final_optimal_i")   = final_optimal_i,
+    Rcpp::Named("final_unac")        = final_unac,
     Rcpp::Named("pr_xi_T")           = pr_xi_T,
     Rcpp::Named("pr_xi_R")           = pr_xi_R,
     Rcpp::Named("unac_dose_i")       = unac_dose_i,
@@ -2151,29 +2132,8 @@ List run_trial_mpbr(
 }
 
 
-/////////// trial: no_skip_version2, toxicity monitoring only while small //////
+/////////// trial: veto, toxicity monitoring only while small //////
 
-// One replicate of the adaptive trial using no_skip_version2 assignment, where
-// marginal toxicity contributes to dose removal only while the accrued sample
-// size is at or below veto_point. Beyond that point doses are removed on
-// expected utility alone.
-//
-// Requires no_skip_v2_assign_internal, sim_cohort_internal and
-// run_sampler_internal, all defined earlier in this file.
-//
-// Monitoring arguments
-//   h_T        - toxicity dichotomisation index; xi_T = Pr(y_T >= h_T),
-//                i.e. marginal toxicity categories h_T..K[0]-1
-//   upper_xi_T - toxicity threshold; a dose is unacceptable if
-//                Pr(xi_T > upper_xi_T | data) > c_T
-//   U_low      - utility lower bound; a dose is unacceptable if
-//                Pr(EU < U_low | data) > cu_t
-//   cu_star_T  - final toxicity cut-off, used to form c_T
-//   cu_star    - final utility cut-off, used to form cu_t
-//   veto_point  - largest n_t at which the toxicity criterion still applies;
-//                for n_t > veto_point only the utility criterion is used
-//
-// Both cut-offs shrink with accrual: c = 1 - n_t/N_max * (1 - cu_star).
 // [[Rcpp::export]]
 List run_trial_veto_ubr(
     int co_sz,
@@ -2454,6 +2414,23 @@ List run_trial_veto_ubr(
     A_t_Count[l] = c;
   }
   
+  // final_unac: doses unacceptable at the end of the trial
+  std::vector<int> fu_v;
+  for (int l = 0; l < n_doses; l++) {
+    
+    bool is_unac = (dose_count[l] == 0);
+    
+    if (!is_unac) {
+      for (int u = 0; u < unac_dose_i.size(); u++) {
+        if (unac_dose_i[u] == l + 1) { is_unac = true; break; }
+      }
+    }
+    
+    if (is_unac) fu_v.push_back(l + 1);
+  }
+  IntegerVector final_unac(fu_v.size());
+  for (size_t u = 0; u < fu_v.size(); u++) final_unac[u] = fu_v[u];
+  
   return List::create(
     Rcpp::Named("y")                 = y,
     Rcpp::Named("samp")              = samp,
@@ -2462,6 +2439,7 @@ List run_trial_veto_ubr(
     Rcpp::Named("post_mean_utility") = post_mean_utility,
     Rcpp::Named("final_optimal")     = final_optimal,
     Rcpp::Named("final_optimal_i")   = final_optimal_i,
+    Rcpp::Named("final_unac")        = final_unac,
     Rcpp::Named("pr_xi_T")           = pr_xi_T,
     Rcpp::Named("pr_ubar")           = pr_ubar,
     Rcpp::Named("tox_applied")       = tox_applied,
